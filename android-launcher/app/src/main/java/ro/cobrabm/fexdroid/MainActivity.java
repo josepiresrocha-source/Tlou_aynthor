@@ -254,11 +254,13 @@ public final class MainActivity extends Activity {
                 ?"Snapdragon 8 Gen 2 detectado. Ajustes desta edição; valem na próxima abertura do jogo."
                 :"Este aparelho não é um Snapdragon 8 Gen 2; os ajustes funcionam, mas foram pensados para o AYN Thor.",12,MUTED));
             add(thor,"Aplicar perfil recomendado do Thor",true,this::applyThorProfile);
-            thor.addView(text("720p, limite de 30 FPS, VSync, driver Turnip Thor, cache de shaders e núcleos grandes.",12,MUTED));
+            thor.addView(text("720p, limite de 30 FPS, VSync, driver Turnip Thor, cache de shaders, núcleos grandes e lógica original dos workers.",12,MUTED));
             toggleSetting(thor,"thor_shader_cache","Cache de shaders do driver",true);
             thor.addView(text("Guarda os shaders compilados pelo driver: menos travadas ao voltar a áreas já visitadas.",12,MUTED));
             toggleSetting(thor,"thor_fast_cores","Threads principais nos núcleos grandes",ThorProfile.device());
             thor.addView(text("Tira as threads de renderização dos 3 núcleos pequenos (A510). Compare ligado e desligado na mesma cena.",12,MUTED));
+            toggleSetting(thor,"thor_original_job_wake","Lógica original dos workers do jogo",ThorProfile.device());
+            thor.addView(text("Evita o travamento \"Job System Deadlock Detected\". Desligar volta ao patch de economia de CPU da v0.1, que travou no Thor.",12,MUTED));
             add(thor,"Limpar cache de shaders",false,this::clearShaderCache);
             add(thor,"Variáveis de ambiente extras",false,this::editExtraEnv);
             LinearLayout app=card(root,"IDIOMA E INTERFACE");

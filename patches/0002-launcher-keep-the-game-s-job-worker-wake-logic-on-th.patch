@@ -1,0 +1,119 @@
+From de4f71852815ed32ed8e28a0f5ddc7168ef0b10b Mon Sep 17 00:00:00 2001
+From: josepiresrocha-source <josepiresrocha-source@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 15:11:48 -0400
+Subject: [PATCH 2/2] launcher: keep the game's job-worker wake logic on the
+ AYN Thor
+
+The Thor edition hit "HALT: Job System Deadlock Detected" about three
+minutes into a session: RenderFrameJob and GameLoopUpdate waited on a job
+counter while the presenter kept flipping. That is the HALT the port's
+author fixed on the Snapdragon 7+ Gen 2 by dropping the preparer's
+"job-sleep" patch (forced condition-variable sleep for job workers) and
+keeping the game's original wake branches (job_sleep=false in
+patch-options.json, honored by tlou_patches.py from bab5b59).
+
+Do the same on SM8550 by default, with a switch in the AYN THOR card and
+the state in the launch log. Takes effect on the next launch, when the
+executable patches are rebuilt.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KggzvL8zXAkzHKvMM3vhEZ
+---
+ android-launcher/app/build.gradle                        | 4 ++--
+ .../src/main/java/ro/cobrabm/fexdroid/MainActivity.java  | 4 +++-
+ .../src/main/java/ro/cobrabm/fexdroid/PortSettings.java  | 5 +++++
+ .../src/main/java/ro/cobrabm/fexdroid/ThorProfile.java   | 9 ++++++++-
+ 4 files changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/android-launcher/app/build.gradle b/android-launcher/app/build.gradle
+index d02f54b..f2f8f90 100644
+--- a/android-launcher/app/build.gradle
++++ b/android-launcher/app/build.gradle
+@@ -12,8 +12,8 @@ android {
+         // Android 10/11 allow execution of extracted native payload in app-private files
+         // for legacy target SDK. Keep separate from SDK version for compilation.
+         targetSdk 28
+-        versionCode 3801
+-        versionName '0.1-thor1'
++        versionCode 3802
++        versionName '0.1-thor2'
+     }
+     buildTypes {
+         release { minifyEnabled false }
+diff --git a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/MainActivity.java b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/MainActivity.java
+index 5ec25f2..caf91ed 100644
+--- a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/MainActivity.java
++++ b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/MainActivity.java
+@@ -254,11 +254,13 @@ public final class MainActivity extends Activity {
+                 ?"Snapdragon 8 Gen 2 detectado. Ajustes desta edição; valem na próxima abertura do jogo."
+                 :"Este aparelho não é um Snapdragon 8 Gen 2; os ajustes funcionam, mas foram pensados para o AYN Thor.",12,MUTED));
+             add(thor,"Aplicar perfil recomendado do Thor",true,this::applyThorProfile);
+-            thor.addView(text("720p, limite de 30 FPS, VSync, driver Turnip Thor, cache de shaders e núcleos grandes.",12,MUTED));
++            thor.addView(text("720p, limite de 30 FPS, VSync, driver Turnip Thor, cache de shaders, núcleos grandes e lógica original dos workers.",12,MUTED));
+             toggleSetting(thor,"thor_shader_cache","Cache de shaders do driver",true);
+             thor.addView(text("Guarda os shaders compilados pelo driver: menos travadas ao voltar a áreas já visitadas.",12,MUTED));
+             toggleSetting(thor,"thor_fast_cores","Threads principais nos núcleos grandes",ThorProfile.device());
+             thor.addView(text("Tira as threads de renderização dos 3 núcleos pequenos (A510). Compare ligado e desligado na mesma cena.",12,MUTED));
++            toggleSetting(thor,"thor_original_job_wake","Lógica original dos workers do jogo",ThorProfile.device());
++            thor.addView(text("Evita o travamento \"Job System Deadlock Detected\". Desligar volta ao patch de economia de CPU da v0.1, que travou no Thor.",12,MUTED));
+             add(thor,"Limpar cache de shaders",false,this::clearShaderCache);
+             add(thor,"Variáveis de ambiente extras",false,this::editExtraEnv);
+             LinearLayout app=card(root,"IDIOMA E INTERFACE");
+diff --git a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/PortSettings.java b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/PortSettings.java
+index e5066f8..1d1dfbb 100644
+--- a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/PortSettings.java
++++ b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/PortSettings.java
+@@ -35,6 +35,11 @@ final class PortSettings {
+         SharedPreferences p=prefs(context);
+         JSONObject options=new JSONObject();
+         options.put("resolution",p.getString("resolution","original"));
++        // AYN Thor edition: keep the game's own job-worker wake logic (drop the
++        // preparer's "job-sleep" patch) where it deadlocks. Same fix the port's
++        // author shipped for the Snapdragon 7+ Gen 2 after a "Job System
++        // Deadlock Detected" HALT; the Thor showed the same HALT.
++        options.put("job_sleep",!ThorProfile.originalJobWake(p));
+         for(String key:EFFECTS) options.put(key,p.getBoolean(key,false));
+         File file=new File(context.getFilesDir(),"patch-options.json");
+         Files.write(file.toPath(),options.toString().getBytes(StandardCharsets.UTF_8));
+diff --git a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/ThorProfile.java b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/ThorProfile.java
+index f3ec754..f989325 100644
+--- a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/ThorProfile.java
++++ b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/ThorProfile.java
+@@ -20,6 +20,9 @@ import java.util.Map;
+  *   cores (3-7); worker threads keep the full mask. It was dropped from the stock launcher
+  *   because it showed no gain on the 8 Elite, which has no little cores at all.
+  * - The player's extra environment lines (ThorEnv), applied last.
++ * - The game's original job-worker wake logic (patch-options.json job_sleep=false): the
++ *   preparer's "job-sleep" patch forces workers onto a condition-variable wait, and on the
++ *   Thor that ended in "HALT: Job System Deadlock Detected", as it did on the 7+ Gen 2.
+  */
+ final class ThorProfile {
+     static final String DRIVER_ASSET="drivers/turnip-thor-a740.zip";
+@@ -45,6 +48,8 @@ final class ThorProfile {
+     static File shaderCache(Context context) { return new File(context.getCacheDir(),"mesa"); }
+ 
+     static boolean fastCores(SharedPreferences p) { return p.getBoolean("thor_fast_cores",device()); }
++    /** Game's original job-worker wake branches instead of the preparer's forced sleep. */
++    static boolean originalJobWake(SharedPreferences p) { return p.getBoolean("thor_original_job_wake",device()); }
+     static boolean shaderCacheEnabled(SharedPreferences p) { return p.getBoolean("thor_shader_cache",true); }
+ 
+     static void environment(Context context,SharedPreferences p,Map<String,String> env) {
+@@ -69,12 +74,14 @@ final class ThorProfile {
+             "; shader-cache="+(env.containsKey("MESA_SHADER_CACHE_DIR")?env.get("MESA_SHADER_CACHE_DIR"):"off")+
+             "; fast-render-cores="+("1".equals(env.get("TLOU_FAST_RENDER_CORES"))?"on":"off")+
+             "; fps-limit="+env.get("GOW3_FPS_LIMIT")+
++            "; job-worker-wake="+(originalJobWake(p)?"original":"patched-sleep")+
+             "; extra-env="+ThorEnv.keys(p.getString("thor_extra_env",""));
+     }
+ 
+     /** One tap: the settings this edition was tuned for. Takes effect on the next launch. */
+     static void applyRecommended(SharedPreferences p) {
+         p.edit().putString("resolution","720").putString("fps_limit","30").putBoolean("vsync",true)
+-            .putBoolean("thor_fast_cores",true).putBoolean("thor_shader_cache",true).apply();
++            .putBoolean("thor_fast_cores",true).putBoolean("thor_shader_cache",true)
++            .putBoolean("thor_original_job_wake",true).apply();
+     }
+ }
+-- 
+2.43.0
+

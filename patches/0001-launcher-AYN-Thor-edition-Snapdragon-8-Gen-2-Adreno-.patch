@@ -1,7 +1,8 @@
 From 6baf0546be72673eab2ffdecf32ef56f9a7151aa Mon Sep 17 00:00:00 2001
 From: josepiresrocha-source <josepiresrocha-source@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 13:41:46 -0400
-Subject: [PATCH] launcher: AYN Thor edition (Snapdragon 8 Gen 2 / Adreno 740)
+Subject: [PATCH 1/2] launcher: AYN Thor edition (Snapdragon 8 Gen 2 / Adreno
+ 740)
 
 Based on 0066e7f, the launcher of the public v0.1 APK.
 

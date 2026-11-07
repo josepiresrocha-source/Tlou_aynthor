@@ -12,6 +12,7 @@ A parte nativa do APK (FEX, renderizador Vulkan, runtime Bionic, Python e ferram
 | **Cache de shaders do driver ligado** (`MESA_SHADER_CACHE_DIR` + `MESA_SHADER_CACHE_DISABLE=false`) | O port não salva o `VkPipelineCache` em disco, e o Mesa deixa o cache em disco desligado no Android. O jogo roda como executável separado do app, então nem o patch de cache do Turnip Thor acha a pasta sozinho. Sem isso, toda sessão recompila todos os pipelines: são as travadas ao entrar numa área. Funciona com qualquer Turnip, inclusive o R1. |
 | **Threads principais fora dos núcleos pequenos** (`TLOU_FAST_RENDER_CORES=1`) | O runtime já tem essa política, mas o launcher original a desligou porque não ajudou no Snapdragon 8 Elite (que não tem núcleos pequenos). No 8 Gen 2 ela mantém as 4 threads críticas (main do jogo, processador de comandos da GPU, gravação de draws, gravador Vulkan) nos núcleos X3 + A715/A710 (3–7), longe dos 3 Cortex-A510. Os workers continuam com todos os núcleos. |
 | **Limite de 30 FPS por padrão** no 8 Gen 2 (só em instalação nova) | Ver "Expectativa realista" abaixo. |
+| **Lógica original dos workers do jogo** no 8 Gen 2 | A v0.1 aplica no executável um patch ("job-sleep") que faz os workers do sistema de jobs dormirem para economizar CPU. No Thor isso terminou em **"HALT: Job System Deadlock Detected"** uns 3 minutos depois de começar a jogar, o mesmo travamento que o autor corrigiu no Snapdragon 7+ Gen 2 tirando esse patch. A edição Thor faz o mesmo (`job_sleep=false`); dá para desligar no cartão AYN THOR. |
 | **Correção da mira em 720p/540p/360p** | Commit `e89f357` do autor (posterior à v0.1): a tabela de patches normalizava a mira em pixels de 1080p em qualquer resolução. Só o arquivo `tlou_patches.py` dentro do `tools.zip` é trocado, do mesmo jeito que o próprio CI do autor faz. |
 | **Cartão "AYN THOR"** em Ajustes | Botão de perfil recomendado (720p, 30 FPS, VSync, Turnip Thor, cache, núcleos grandes), chaves do cache e dos núcleos, limpar cache, e **variáveis de ambiente extras** (`NOME=VALOR`, uma por linha) para testes A/B do driver. Tudo aparece no log. |
 | **Pacote próprio** (`com.daedalus.tlou.remastered.thor`, nome "TLOU Remastered · AYN Thor") | O APK original é assinado com uma chave que só o autor tem; com outro pacote a edição Thor instala **ao lado** do original, e dá para comparar os dois no mesmo lugar do jogo. |
@@ -52,7 +53,7 @@ No Thor, use o modo de desempenho do sistema e a ventoinha no modo forte.
 
 ## Arquivos
 
-- `android-launcher/` — launcher do commit `0066e7f` (o da v0.1) com as mudanças da edição Thor. O diff completo está em `patches/0001-launcher-AYN-Thor-edition-*.patch`.
+- `android-launcher/` — launcher do commit `0066e7f` (o da v0.1) com as mudanças da edição Thor. O diff completo está em `patches/` (`0001` edição Thor, `0002` lógica original dos workers).
 - `android/tlou_patches.py` — do commit `bab5b59` do autor (correção da mira).
 - `stage_apk.py` — copia a parte nativa do APK oficial, troca o `tlou_patches.py` no `tools.zip` e embute o driver.
 - `check_apk.py` — confere o APK final contra o oficial.

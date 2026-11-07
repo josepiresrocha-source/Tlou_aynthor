@@ -20,6 +20,9 @@ import java.util.Map;
  *   cores (3-7); worker threads keep the full mask. It was dropped from the stock launcher
  *   because it showed no gain on the 8 Elite, which has no little cores at all.
  * - The player's extra environment lines (ThorEnv), applied last.
+ * - The game's original job-worker wake logic (patch-options.json job_sleep=false): the
+ *   preparer's "job-sleep" patch forces workers onto a condition-variable wait, and on the
+ *   Thor that ended in "HALT: Job System Deadlock Detected", as it did on the 7+ Gen 2.
  */
 final class ThorProfile {
     static final String DRIVER_ASSET="drivers/turnip-thor-a740.zip";
@@ -45,6 +48,8 @@ final class ThorProfile {
     static File shaderCache(Context context) { return new File(context.getCacheDir(),"mesa"); }
 
     static boolean fastCores(SharedPreferences p) { return p.getBoolean("thor_fast_cores",device()); }
+    /** Game's original job-worker wake branches instead of the preparer's forced sleep. */
+    static boolean originalJobWake(SharedPreferences p) { return p.getBoolean("thor_original_job_wake",device()); }
     static boolean shaderCacheEnabled(SharedPreferences p) { return p.getBoolean("thor_shader_cache",true); }
 
     static void environment(Context context,SharedPreferences p,Map<String,String> env) {
@@ -69,12 +74,14 @@ final class ThorProfile {
             "; shader-cache="+(env.containsKey("MESA_SHADER_CACHE_DIR")?env.get("MESA_SHADER_CACHE_DIR"):"off")+
             "; fast-render-cores="+("1".equals(env.get("TLOU_FAST_RENDER_CORES"))?"on":"off")+
             "; fps-limit="+env.get("GOW3_FPS_LIMIT")+
+            "; job-worker-wake="+(originalJobWake(p)?"original":"patched-sleep")+
             "; extra-env="+ThorEnv.keys(p.getString("thor_extra_env",""));
     }
 
     /** One tap: the settings this edition was tuned for. Takes effect on the next launch. */
     static void applyRecommended(SharedPreferences p) {
         p.edit().putString("resolution","720").putString("fps_limit","30").putBoolean("vsync",true)
-            .putBoolean("thor_fast_cores",true).putBoolean("thor_shader_cache",true).apply();
+            .putBoolean("thor_fast_cores",true).putBoolean("thor_shader_cache",true)
+            .putBoolean("thor_original_job_wake",true).apply();
     }
 }

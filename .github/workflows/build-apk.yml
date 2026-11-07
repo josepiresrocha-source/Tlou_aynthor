@@ -62,7 +62,7 @@ jobs:
     timeout-minutes: 60
     env:
       APK_URL: https://github.com/erickmendes22/tlou-remastered-android/releases/download/v0.1-android-bionic/TheLastOfUsRemastered-Android-v0.1.apk
-      OUT_NAME: TLOU-Remastered-AYN-Thor-0.1-thor1-b${{ github.run_number }}
+      OUT_NAME: TLOU-Remastered-AYN-Thor-0.1-thor2-b${{ github.run_number }}
       # Signing key: the repository secret TLOU_KEYSTORE_B64 (PKCS12, alias tlou-thor, password in
       # TLOU_KEYSTORE_PASSWORD) when set; otherwise one generated on the first run and kept in this
       # repository's Actions cache. The key is never committed.
@@ -103,7 +103,9 @@ jobs:
           import tlou_patches as t
           for r in ('original', '720', '540', '360'):
               t.selected_options({'resolution': r})
-          print('tlou_patches.py: original/720/540/360 OK')
+          assert 'job-sleep' in t.base_patches_for({})
+          assert 'job-sleep' not in t.base_patches_for({'job_sleep': False})
+          print('tlou_patches.py: original/720/540/360 OK; job_sleep=false drops the job-sleep patch')
           "
 
       - name: Stage native payload, aim fix and driver

@@ -35,6 +35,11 @@ final class PortSettings {
         SharedPreferences p=prefs(context);
         JSONObject options=new JSONObject();
         options.put("resolution",p.getString("resolution","original"));
+        // AYN Thor edition: keep the game's own job-worker wake logic (drop the
+        // preparer's "job-sleep" patch) where it deadlocks. Same fix the port's
+        // author shipped for the Snapdragon 7+ Gen 2 after a "Job System
+        // Deadlock Detected" HALT; the Thor showed the same HALT.
+        options.put("job_sleep",!ThorProfile.originalJobWake(p));
         for(String key:EFFECTS) options.put(key,p.getBoolean(key,false));
         File file=new File(context.getFilesDir(),"patch-options.json");
         Files.write(file.toPath(),options.toString().getBytes(StandardCharsets.UTF_8));
