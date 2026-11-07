@@ -1,0 +1,498 @@
+From 6baf0546be72673eab2ffdecf32ef56f9a7151aa Mon Sep 17 00:00:00 2001
+From: josepiresrocha-source <josepiresrocha-source@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 13:41:46 -0400
+Subject: [PATCH] launcher: AYN Thor edition (Snapdragon 8 Gen 2 / Adreno 740)
+
+Based on 0066e7f, the launcher of the public v0.1 APK.
+
+- Own application id (com.daedalus.tlou.remastered.thor), so it installs
+  beside the original APK, which is signed with a key only its author has.
+- Bundled Turnip Thor driver (drivers/turnip-thor-a740.zip + .sha256,
+  staged by CI) selected by default on Adreno 740; the stock Turnip R1
+  stays installed and selectable.
+- Mesa shader disk cache: MESA_SHADER_CACHE_DIR in the app cache and
+  MESA_SHADER_CACHE_DISABLE=false. The game is a separate executable, so
+  Mesa cannot find an app cache directory itself and keeps the cache off.
+- TLOU_FAST_RENDER_CORES=1 on SM8550: the runtime's existing policy keeps
+  the four critical render threads off the three Cortex-A510 cores.
+- 30 FPS limit by default on SM8550 (fresh installs only).
+- "AYN THOR" settings card: recommended profile, shader cache and core
+  switches, clear cache, and extra environment lines (validated, applied
+  last, logged) for driver A/B tests.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KggzvL8zXAkzHKvMM3vhEZ
+---
+ android-launcher/app/build.gradle             |  8 +-
+ .../app/src/main/AndroidManifest.xml          |  2 +-
+ .../ro/cobrabm/fexdroid/BuiltinDrivers.java   | 81 ++++++++++++++-----
+ .../ro/cobrabm/fexdroid/GameActivity.java     |  4 +
+ .../ro/cobrabm/fexdroid/MainActivity.java     | 64 +++++++++++++++
+ .../java/ro/cobrabm/fexdroid/ThorEnv.java     | 70 ++++++++++++++++
+ .../java/ro/cobrabm/fexdroid/ThorProfile.java | 80 ++++++++++++++++++
+ .../java/ro/cobrabm/fexdroid/ThorEnvTest.java | 42 ++++++++++
+ 8 files changed, 325 insertions(+), 26 deletions(-)
+ create mode 100644 android-launcher/app/src/main/java/ro/cobrabm/fexdroid/ThorEnv.java
+ create mode 100644 android-launcher/app/src/main/java/ro/cobrabm/fexdroid/ThorProfile.java
+ create mode 100644 android-launcher/app/src/test/java/ro/cobrabm/fexdroid/ThorEnvTest.java
+
+diff --git a/android-launcher/app/build.gradle b/android-launcher/app/build.gradle
+index 88dd8da..d02f54b 100644
+--- a/android-launcher/app/build.gradle
++++ b/android-launcher/app/build.gradle
+@@ -5,13 +5,15 @@ android {
+     namespace 'ro.cobrabm.fexdroid'
+     compileSdk 35
+     defaultConfig {
+-        applicationId 'com.daedalus.tlou.remastered'
++        // AYN Thor edition: its own id, so it installs beside the original APK
++        // (different signing key) and both can be compared on the same device.
++        applicationId 'com.daedalus.tlou.remastered.thor'
+         minSdk 30
+         // Android 10/11 allow execution of extracted native payload in app-private files
+         // for legacy target SDK. Keep separate from SDK version for compilation.
+         targetSdk 28
+-        versionCode 38
+-        versionName '0.1'
++        versionCode 3801
++        versionName '0.1-thor1'
+     }
+     buildTypes {
+         release { minifyEnabled false }
+diff --git a/android-launcher/app/src/main/AndroidManifest.xml b/android-launcher/app/src/main/AndroidManifest.xml
+index e2251fc..fb16545 100644
+--- a/android-launcher/app/src/main/AndroidManifest.xml
++++ b/android-launcher/app/src/main/AndroidManifest.xml
+@@ -4,7 +4,7 @@
+   <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+   <application android:name="ro.cobrabm.fexdroid.TlouApplication" android:allowBackup="false" android:isGame="true" android:appCategory="game"
+-               android:label="The Last of Us Remastered Android"
++               android:label="TLOU Remastered · AYN Thor"
+                android:icon="@drawable/tlou_app_icon"
+                android:usesCleartextTraffic="false"
+                android:extractNativeLibs="true"
+diff --git a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/BuiltinDrivers.java b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/BuiltinDrivers.java
+index 768707e..ddc44bf 100644
+--- a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/BuiltinDrivers.java
++++ b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/BuiltinDrivers.java
+@@ -15,7 +15,8 @@ import java.io.InputStream;
+ import java.nio.file.Files;
+ import java.util.Locale;
+ 
+-/** Install the pinned official Turnip 27.0.0-R1 only on detected Adreno 6xx/7xx. */
++/** Install the pinned official Turnip 27.0.0-R1 on detected Adreno 6xx/7xx and, in the AYN
++ * Thor edition, the bundled Turnip Thor build on Adreno 740 (selected by default there). */
+ final class BuiltinDrivers {
+     private static final String ASSET="drivers/turnip-v27-r1-a6xx-a7xx.zip";
+     private static final String SHA="07938ef843a73dd47ebb88ba9c2d3bca011667bd2b657e3b4a75d9ba8ed591a0";
+@@ -62,22 +63,8 @@ final class BuiltinDrivers {
+         }
+     }
+ 
+-    static synchronized void ensureDefault(Context context) throws Exception {
+-        SharedPreferences p=PortSettings.prefs(context);
+-        // Even an explicit "system driver" choice (empty path) must win.
+-        if(p.contains("driver_path"))return;
+-        final String gpu;
+-        try { gpu=renderer(); }
+-        catch(Throwable e) { return; } // unknown GPU: keep system default
+-        String name=gpu.toLowerCase(Locale.ROOT);
+-        if(!name.contains("adreno"))return;
+-        boolean a8=name.matches(".*\\b8[0-9]{2}\\b.*");
+-        boolean a67=name.matches(".*\\b[67][0-9]{2}\\b.*");
+-        if(!a8 && !a67)return;
+-        String asset=a8?ASSET_8XX:ASSET;
+-        String digest=a8?SHA_8XX:SHA;
+-        String display=a8?"Turnip Gen8 V38 Patched · Adreno 8xx":"Turnip v27.0.0-R1 · Adreno 6xx/7xx";
+-        File drivers=new File(context.getFilesDir(),"drivers");
++    private static DriverArchive.Installed installAsset(Context context,File drivers,String asset,
++                                                       String digest,String display) throws Exception {
+         try(InputStream archive=context.getAssets().open(asset)){
+             DriverArchive.Installed installed=DriverArchive.install(
+                 drivers,archive,Build.VERSION.SDK_INT,file->{
+@@ -89,12 +76,62 @@ final class BuiltinDrivers {
+                         meta.optInt("minApi",26));
+                 });
+             if(!digest.equals(installed.id))
+-                throw new IllegalStateException("Turnip R1 archive digest mismatch");
+-            p.edit().putString("driver_path",installed.library.getAbsolutePath())
+-                .putString("driver_name",display).apply();
++                throw new IllegalStateException("Bundled driver digest mismatch: "+asset);
++            return installed;
+         } catch(java.io.FileNotFoundException missingAsset) {
+-            // Developer checkout without staged APK assets: system driver, never
+-            // secretly pick an incompatible one.
++            // Developer checkout without staged APK assets: never secretly pick
++            // an incompatible driver.
++            return null;
++        }
++    }
++
++    /** The Turnip Thor build staged by the Thor edition's CI, with its SHA-256 beside it. */
++    private static DriverArchive.Installed installThor(Context context,File drivers) throws Exception {
++        final String digest;
++        try(InputStream in=context.getAssets().open(ThorProfile.DRIVER_SHA_ASSET)) {
++            byte[] raw=new byte[256]; int n=in.read(raw);
++            String text=n>0?new String(raw,0,n,java.nio.charset.StandardCharsets.US_ASCII).trim():"";
++            digest=text.split("\\s+")[0].toLowerCase(Locale.ROOT);
++        } catch(java.io.FileNotFoundException missing) { return null; }
++        if(!digest.matches("[0-9a-f]{64}"))throw new IllegalStateException("Bad Thor driver digest");
++        return installAsset(context,drivers,ThorProfile.DRIVER_ASSET,digest,"Turnip Thor");
++    }
++
++    static synchronized void ensureDefault(Context context) throws Exception {
++        SharedPreferences p=PortSettings.prefs(context);
++        // Even an explicit "system driver" choice (empty path) must win. The Thor
++        // edition still installs its bundled drivers once so both stay selectable.
++        final boolean chosen=p.contains("driver_path");
++        if(chosen && p.getBoolean("thor_drivers_installed",false))return;
++        final String gpu;
++        try { gpu=renderer(); }
++        catch(Throwable e) { return; } // unknown GPU: keep system default
++        String name=gpu.toLowerCase(Locale.ROOT);
++        boolean a8=name.contains("adreno") && name.matches(".*\\b8[0-9]{2}\\b.*");
++        boolean a67=name.contains("adreno") && name.matches(".*\\b[67][0-9]{2}\\b.*");
++        if(!a8 && !a67) { p.edit().putBoolean("thor_drivers_installed",true).apply(); return; }
++        String display=a8?"Turnip Gen8 V38 Patched · Adreno 8xx":"Turnip v27.0.0-R1 · Adreno 6xx/7xx";
++        File drivers=new File(context.getFilesDir(),"drivers");
++        // One broken asset must not hide the other driver.
++        DriverArchive.Installed stock=null,thor=null;
++        Exception failure=null;
++        try { stock=installAsset(context,drivers,a8?ASSET_8XX:ASSET,a8?SHA_8XX:SHA,display); }
++        catch(Exception e) { failure=e; }
++        if(ThorProfile.adreno740(gpu)) {
++            try { thor=installThor(context,drivers); }
++            catch(Exception e) { failure=e; }
++        }
++        if(failure!=null && stock==null && thor==null)throw failure;
++        SharedPreferences.Editor edit=p.edit();
++        if(failure==null)edit.putBoolean("thor_drivers_installed",true);
++        if(!chosen) {
++            if(thor!=null)
++                edit.putString("driver_path",thor.library.getAbsolutePath())
++                    .putString("driver_name",thor.name+ThorProfile.DRIVER_LABEL);
++            else if(stock!=null)
++                edit.putString("driver_path",stock.library.getAbsolutePath())
++                    .putString("driver_name",display);
+         }
++        edit.apply();
+     }
+ }
+diff --git a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/GameActivity.java b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/GameActivity.java
+index 2dd9daf..2b38a17 100644
+--- a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/GameActivity.java
++++ b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/GameActivity.java
+@@ -307,6 +307,10 @@ public final class GameActivity extends Activity {
+                 env.put("GOW3_VULKAN_DRIVER",custom.getAbsolutePath());
+                 env.put("LD_LIBRARY_PATH",custom.getParent()+":"+getApplicationInfo().nativeLibraryDir);
+             }
++            // AYN Thor edition: shader disk cache, fast-core placement and the player's
++            // extra environment (applied last, so it can override the lines above).
++            ThorProfile.environment(this,PortSettings.prefs(this),env);
++            RunLog.write(this,ThorProfile.report(env,PortSettings.prefs(this)));
+             builder.directory(app0);
+             builder.redirectErrorStream(true);
+             builder.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile));
+diff --git a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/MainActivity.java b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/MainActivity.java
+index 904b9c9..5ec25f2 100644
+--- a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/MainActivity.java
++++ b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/MainActivity.java
+@@ -51,6 +51,9 @@ public final class MainActivity extends Activity {
+         if(!prefs.contains("resolution"))initial.putString("resolution","720");
+         for(String effect:PortSettings.EFFECTS)
+             if(!prefs.contains(effect))initial.putBoolean(effect,true);
++        // AYN Thor: a steady 30 paces better than an uncapped low-30s/20s on the
++        // Snapdragon 8 Gen 2 and leaves thermal headroom. Fresh installs only.
++        if(!prefs.contains("fps_limit") && ThorProfile.device())initial.putString("fps_limit","30");
+         initial.apply();
+         // Keep paths chosen in the first experimental APK.
+         if (!prefs.contains("game_path")) prefs.edit().putString("game_path",getPreferences(0).getString("prepared_path","")).apply();
+@@ -246,6 +249,18 @@ public final class MainActivity extends Activity {
+             add(drivers,"Importar driver ZIP ou SO",false,()->pickFile(PICK_DRIVER));
+             toggleSetting(drivers,"gpu_turbo","Adreno Turbo (sem root)",false);
+             drivers.addView(text("Política KGSL de máximo desempenho; a proteção térmica continua ativa. Pode não funcionar em todos os dispositivos.",12,MUTED));
++            LinearLayout thor=card(root,"AYN THOR");
++            thor.addView(text(ThorProfile.device()
++                ?"Snapdragon 8 Gen 2 detectado. Ajustes desta edição; valem na próxima abertura do jogo."
++                :"Este aparelho não é um Snapdragon 8 Gen 2; os ajustes funcionam, mas foram pensados para o AYN Thor.",12,MUTED));
++            add(thor,"Aplicar perfil recomendado do Thor",true,this::applyThorProfile);
++            thor.addView(text("720p, limite de 30 FPS, VSync, driver Turnip Thor, cache de shaders e núcleos grandes.",12,MUTED));
++            toggleSetting(thor,"thor_shader_cache","Cache de shaders do driver",true);
++            thor.addView(text("Guarda os shaders compilados pelo driver: menos travadas ao voltar a áreas já visitadas.",12,MUTED));
++            toggleSetting(thor,"thor_fast_cores","Threads principais nos núcleos grandes",ThorProfile.device());
++            thor.addView(text("Tira as threads de renderização dos 3 núcleos pequenos (A510). Compare ligado e desligado na mesma cena.",12,MUTED));
++            add(thor,"Limpar cache de shaders",false,this::clearShaderCache);
++            add(thor,"Variáveis de ambiente extras",false,this::editExtraEnv);
+             LinearLayout app=card(root,"IDIOMA E INTERFACE");
+             languageChoice(app);
+             app.addView(text("O idioma do jogo é escolhido no próprio The Last of Us.",12,MUTED));
+@@ -405,6 +420,55 @@ public final class MainActivity extends Activity {
+             update("Driver importado e selecionado.");
+         });
+     }
++    private void applyThorProfile() {
++        ThorProfile.applyRecommended(prefs);
++        // Keep a Turnip Thor build that is already selected (bundled or imported);
++        // otherwise pick one that is installed.
++        String path=prefs.getString("driver_path",""),name=prefs.getString("driver_name","");
++        if(!name.startsWith("Turnip Thor")) {
++            path=null;
++            File root=new File(getFilesDir(),"drivers");File[] dirs=root.listFiles();
++            if(dirs!=null)for(File d:dirs) {
++                if(d.getName().equals("raw") || d.getName().startsWith("."))continue;
++                try {
++                    DriverArchive.Installed installed=DriverArchive.read(root,d.getName(),Build.VERSION.SDK_INT);
++                    if(installed.name.startsWith("Turnip Thor")){path=installed.library.getAbsolutePath();name=installed.name;break;}
++                } catch(Exception ignored) {}
++            }
++            if(path!=null)prefs.edit().putString("driver_path",path).putString("driver_name",name).apply();
++        }
++        buildHome();
++        alert("Perfil do Thor aplicado",path!=null
++            ?"720p, 30 FPS, VSync, cache de shaders e núcleos grandes. Driver: "+name+". Os efeitos da aba Patches não foram alterados."
++            :"720p, 30 FPS, VSync, cache de shaders e núcleos grandes. Nenhum driver Turnip Thor instalado: importe o ZIP em Importar driver ZIP ou SO.");
++    }
++    private void clearShaderCache() {
++        task("Limpando cache de shaders…",()->{
++            InstallTools.delete(ThorProfile.shaderCache(this));
++            update("Cache de shaders limpo. A próxima sessão recompila os shaders.");
++        });
++    }
++    private void editExtraEnv() {
++        EditText input=new EditText(this);
++        input.setText(prefs.getString("thor_extra_env",""));
++        input.setHint("TU_MUTABLE_UBWC=1");
++        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE|
++            android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
++        input.setMinLines(4);input.setGravity(Gravity.TOP|Gravity.START);input.setTypeface(Typeface.MONOSPACE);
++        LinearLayout box=column();box.setPadding(dp(20),dp(8),dp(20),0);
++        box.addView(text("Uma por linha, NOME=VALOR; linhas com # são ignoradas. Valem na próxima abertura do jogo e aparecem no log.",12,MUTED));
++        box.addView(input);
++        AlertDialog dialog=new AlertDialog.Builder(this).setTitle(TlouLanguage.t(this,"Variáveis de ambiente extras"))
++            .setView(box).setPositiveButton(TlouLanguage.t(this,"Salvar"),null)
++            .setNegativeButton(TlouLanguage.t(this,"Cancelar"),null).create();
++        dialog.setOnShowListener(shown->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
++            String value=input.getText().toString().trim();
++            ThorEnv.Parsed parsed=ThorEnv.parse(value);
++            if(!parsed.errors.isEmpty()){alert("Variáveis não salvas",String.join("\n",parsed.errors));return;}
++            prefs.edit().putString("thor_extra_env",value).apply();dialog.dismiss();
++        }));
++        dialog.show();
++    }
+     private void selectDriver() {
+         List<String> names=new ArrayList<>(),paths=new ArrayList<>();names.add(TlouLanguage.t(this,"Driver do sistema"));paths.add("");
+         File root=new File(getFilesDir(),"drivers");File[] dirs=root.listFiles();
+diff --git a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/ThorEnv.java b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/ThorEnv.java
+new file mode 100644
+index 0000000..609365d
+--- /dev/null
++++ b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/ThorEnv.java
+@@ -0,0 +1,70 @@
++package ro.cobrabm.fexdroid;
++
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++
++/**
++ * AYN Thor edition: the player's extra environment lines (KEY=VALUE, one per line) for
++ * driver and runtime A/B tests, such as TU_MUTABLE_UBWC=1 or TU_DEBUG=... . Pure Java so it
++ * can be unit tested without Android.
++ *
++ * Keys that carry the launcher's own paths, sockets and loader setup are refused: changing
++ * them would not tune anything, only break the launch.
++ */
++final class ThorEnv {
++    static final int MAX_LINES=64, MAX_VALUE=1024;
++    private static final String[] PROTECTED_PREFIXES={"LD_","FEX_APP_","XDG_"};
++    private static final String[] PROTECTED={"PATH","HOME","TMPDIR","PYTHONHOME",
++        "GOW3_VULKAN_DRIVER","GOW3_PAD_FILE","GOW3_AUDIO_FIFO","GOW3_PRESENT_SOCKET",
++        "GOW3_GPU_USER_DIR","GOW3_ANDROID_PORT","GOW3_ANDROID_INPUT"};
++
++    static final class Parsed {
++        final Map<String,String> values=new LinkedHashMap<>();
++        final List<String> errors=new ArrayList<>();
++    }
++
++    private ThorEnv() {}
++
++    static boolean isProtected(String key) {
++        for(String prefix:PROTECTED_PREFIXES)if(key.startsWith(prefix))return true;
++        for(String name:PROTECTED)if(name.equals(key))return true;
++        return false;
++    }
++
++    /** Blank lines and lines starting with '#' are ignored. Later lines win. */
++    static Parsed parse(String text) {
++        Parsed result=new Parsed();
++        if(text==null)return result;
++        String[] lines=text.replace("\r","").split("\n",-1);
++        int used=0;
++        for(int i=0;i<lines.length;i++) {
++            String line=lines[i].trim();
++            if(line.isEmpty() || line.startsWith("#"))continue;
++            String where=String.format(Locale.ROOT,"linha %d: ",i+1);
++            if(++used>MAX_LINES) { result.errors.add(where+"mais de "+MAX_LINES+" variáveis"); break; }
++            int equals=line.indexOf('=');
++            if(equals<1) { result.errors.add(where+"use NOME=VALOR"); continue; }
++            String key=line.substring(0,equals).trim();
++            String value=line.substring(equals+1).trim();
++            if(!key.matches("[A-Za-z_][A-Za-z0-9_]*")) { result.errors.add(where+"nome inválido \""+key+"\""); continue; }
++            if(isProtected(key)) { result.errors.add(where+key+" é definido pelo launcher"); continue; }
++            if(value.length()>MAX_VALUE || value.indexOf('\0')>=0) { result.errors.add(where+"valor inválido"); continue; }
++            result.values.remove(key);
++            result.values.put(key,value);
++        }
++        return result;
++    }
++
++    /** Valid lines only; invalid ones were already refused when the text was saved. */
++    static void apply(String text,Map<String,String> env) {
++        env.putAll(parse(text).values);
++    }
++
++    static String keys(String text) {
++        Map<String,String> values=parse(text).values;
++        return values.isEmpty()?"none":String.join(",",values.keySet());
++    }
++}
+diff --git a/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/ThorProfile.java b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/ThorProfile.java
+new file mode 100644
+index 0000000..f3ec754
+--- /dev/null
++++ b/android-launcher/app/src/main/java/ro/cobrabm/fexdroid/ThorProfile.java
+@@ -0,0 +1,80 @@
++package ro.cobrabm.fexdroid;
++
++import android.content.Context;
++import android.content.SharedPreferences;
++import android.os.Build;
++import java.io.File;
++import java.util.Locale;
++import java.util.Map;
++
++/**
++ * AYN Thor edition (Snapdragon 8 Gen 2 / Adreno 740, Android 13).
++ *
++ * - Mesa shader disk cache. The game runs as a separate executable, so Mesa cannot find the
++ *   app's cache directory by itself, and Mesa keeps the disk cache off on Android unless told
++ *   otherwise. Without it every session recompiles every pipeline (Turnip/ir3), which is
++ *   where the "first time in an area" hitches come from. Works with any Mesa Turnip.
++ * - Critical render threads off the three Cortex-A510 little cores. The runtime already has
++ *   this policy (TLOU_FAST_RENDER_CORES, android_cpu_policy.h): on SM8550 it keeps the guest
++ *   main, GPU command, draw recording and Vulkan recorder threads on the X3 + A715/A710
++ *   cores (3-7); worker threads keep the full mask. It was dropped from the stock launcher
++ *   because it showed no gain on the 8 Elite, which has no little cores at all.
++ * - The player's extra environment lines (ThorEnv), applied last.
++ */
++final class ThorProfile {
++    static final String DRIVER_ASSET="drivers/turnip-thor-a740.zip";
++    static final String DRIVER_SHA_ASSET=DRIVER_ASSET+".sha256";
++    static final String DRIVER_LABEL=" · Adreno 740 (embutido)";
++
++    private ThorProfile() {}
++
++    /** Snapdragon 8 Gen 2 (SM8550), the AYN Thor's SoC. */
++    static boolean device() {
++        final String soc=Build.VERSION.SDK_INT>=31 && Build.SOC_MODEL!=null
++            ?Build.SOC_MODEL.toUpperCase(Locale.ROOT):"";
++        final String model=((Build.MANUFACTURER==null?"":Build.MANUFACTURER)+" "+
++            (Build.MODEL==null?"":Build.MODEL)).toUpperCase(Locale.ROOT);
++        return soc.startsWith("SM8550") || (model.contains("AYN") && model.contains("THOR"));
++    }
++
++    static boolean adreno740(String renderer) {
++        String name=renderer==null?"":renderer.toLowerCase(Locale.ROOT);
++        return name.contains("adreno") && name.matches(".*\\b740\\b.*");
++    }
++
++    static File shaderCache(Context context) { return new File(context.getCacheDir(),"mesa"); }
++
++    static boolean fastCores(SharedPreferences p) { return p.getBoolean("thor_fast_cores",device()); }
++    static boolean shaderCacheEnabled(SharedPreferences p) { return p.getBoolean("thor_shader_cache",true); }
++
++    static void environment(Context context,SharedPreferences p,Map<String,String> env) {
++        if(shaderCacheEnabled(p)) {
++            File dir=shaderCache(context);
++            if(dir.isDirectory() || dir.mkdirs()) {
++                env.put("MESA_SHADER_CACHE_DIR",dir.getAbsolutePath());
++                env.put("MESA_SHADER_CACHE_DISABLE","false");
++            }
++        } else {
++            env.remove("MESA_SHADER_CACHE_DIR");
++            env.put("MESA_SHADER_CACHE_DISABLE","true");
++        }
++        if(fastCores(p))env.put("TLOU_FAST_RENDER_CORES","1");
++        else env.remove("TLOU_FAST_RENDER_CORES");
++        ThorEnv.apply(p.getString("thor_extra_env",""),env);
++    }
++
++    static String report(Map<String,String> env,SharedPreferences p) {
++        return "AYN Thor edition: device="+(device()?"SM8550":"other")+
++            "; soc="+(Build.VERSION.SDK_INT>=31?Build.SOC_MODEL:"?")+
++            "; shader-cache="+(env.containsKey("MESA_SHADER_CACHE_DIR")?env.get("MESA_SHADER_CACHE_DIR"):"off")+
++            "; fast-render-cores="+("1".equals(env.get("TLOU_FAST_RENDER_CORES"))?"on":"off")+
++            "; fps-limit="+env.get("GOW3_FPS_LIMIT")+
++            "; extra-env="+ThorEnv.keys(p.getString("thor_extra_env",""));
++    }
++
++    /** One tap: the settings this edition was tuned for. Takes effect on the next launch. */
++    static void applyRecommended(SharedPreferences p) {
++        p.edit().putString("resolution","720").putString("fps_limit","30").putBoolean("vsync",true)
++            .putBoolean("thor_fast_cores",true).putBoolean("thor_shader_cache",true).apply();
++    }
++}
+diff --git a/android-launcher/app/src/test/java/ro/cobrabm/fexdroid/ThorEnvTest.java b/android-launcher/app/src/test/java/ro/cobrabm/fexdroid/ThorEnvTest.java
+new file mode 100644
+index 0000000..7e0b628
+--- /dev/null
++++ b/android-launcher/app/src/test/java/ro/cobrabm/fexdroid/ThorEnvTest.java
+@@ -0,0 +1,42 @@
++package ro.cobrabm.fexdroid;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import java.util.HashMap;
++import java.util.Map;
++import org.junit.Test;
++
++public class ThorEnvTest {
++    @Test public void parsesLinesCommentsAndOverrides() {
++        ThorEnv.Parsed parsed=ThorEnv.parse("# driver A/B\r\nTU_MUTABLE_UBWC=1\n\n  TU_DEBUG = startup \nTU_MUTABLE_UBWC=0\nEMPTY=");
++        assertTrue(parsed.errors.isEmpty());
++        assertEquals("0",parsed.values.get("TU_MUTABLE_UBWC"));
++        assertEquals("startup",parsed.values.get("TU_DEBUG"));
++        assertEquals("",parsed.values.get("EMPTY"));
++        assertEquals("TU_DEBUG,TU_MUTABLE_UBWC,EMPTY",ThorEnv.keys("TU_MUTABLE_UBWC=1\nTU_DEBUG=startup\nTU_MUTABLE_UBWC=0\nEMPTY="));
++    }
++
++    @Test public void refusesLauncherOwnedAndMalformedKeys() {
++        ThorEnv.Parsed parsed=ThorEnv.parse("LD_PRELOAD=/x.so\nHOME=/\nGOW3_VULKAN_DRIVER=/x\nXDG_CACHE_HOME=/x\n"+
++            "FEX_APP_CONFIG_LOCATION=/x\n1BAD=1\nno-equals\n=1\nGOOD=1");
++        assertEquals(8,parsed.errors.size());
++        assertEquals(1,parsed.values.size());
++        assertEquals("1",parsed.values.get("GOOD"));
++    }
++
++    @Test public void applyOverridesLauncherValuesButKeepsOthers() {
++        Map<String,String> env=new HashMap<>();
++        env.put("GOW3_FPS_LIMIT","30");env.put("TLOU_FAST_RENDER_CORES","1");
++        ThorEnv.apply("GOW3_FPS_LIMIT=60\nLD_LIBRARY_PATH=/tmp",env);
++        assertEquals("60",env.get("GOW3_FPS_LIMIT"));
++        assertEquals("1",env.get("TLOU_FAST_RENDER_CORES"));
++        assertTrue(!env.containsKey("LD_LIBRARY_PATH"));
++    }
++
++    @Test public void emptyTextIsNoOp() {
++        assertEquals("none",ThorEnv.keys(""));
++        assertEquals("none",ThorEnv.keys(null));
++        assertTrue(ThorEnv.parse(null).errors.isEmpty());
++    }
++}
+-- 
+2.43.0
+

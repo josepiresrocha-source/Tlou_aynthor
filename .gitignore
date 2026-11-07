@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+work/
+driver/
+out/
+android-launcher/app/build/
+android-launcher/.gradle/

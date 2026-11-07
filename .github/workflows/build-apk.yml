@@ -1,0 +1,180 @@
+name: Build TLOU Thor
+
+# The Last of Us Remastered (Daedalus Android v0.1) for the AYN Thor: the official APK's native
+# payload, unchanged, with the Thor edition launcher (android-launcher/) and, by default, the
+# Turnip Thor driver bundled in. The driver is built from its own repository (driver_repo), so
+# the two projects stay separate.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_driver:
+        description: 'Embutir o driver Turnip Thor (compila o driver junto, ~20 min a mais)'
+        type: boolean
+        default: true
+      driver_repo:
+        description: 'Repositório do driver Turnip Thor'
+        type: string
+        default: 'josepiresrocha-source/turnip_aynthor_ports'
+      driver_ref:
+        description: 'Branch, tag ou commit do driver'
+        type: string
+        default: 'main'
+
+permissions:
+  contents: read
+
+jobs:
+  driver:
+    if: ${{ inputs.bundle_driver }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.driver_repo }}
+          ref: ${{ inputs.driver_ref }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build flex bison glslang-tools curl unzip zip git python3-pip pkg-config
+          pip3 install --break-system-packages meson mako pyyaml packaging
+
+      - name: Build Turnip Thor
+        env:
+          VARIANT: thor
+          BUILD_VERSION: ${{ github.run_number }}
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: turnip-thor-for-tlou
+          path: dist/*.zip
+          retention-days: 7
+
+  apk:
+    needs: driver
+    if: ${{ !cancelled() && (needs.driver.result == 'success' || needs.driver.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      APK_URL: https://github.com/erickmendes22/tlou-remastered-android/releases/download/v0.1-android-bionic/TheLastOfUsRemastered-Android-v0.1.apk
+      OUT_NAME: TLOU-Remastered-AYN-Thor-0.1-thor1-b${{ github.run_number }}
+      # Signing key: the repository secret TLOU_KEYSTORE_B64 (PKCS12, alias tlou-thor, password in
+      # TLOU_KEYSTORE_PASSWORD) when set; otherwise one generated on the first run and kept in this
+      # repository's Actions cache. The key is never committed.
+      KS_FILE: work/signing/tlou-thor.p12
+      KS_PASS: ${{ secrets.TLOU_KEYSTORE_PASSWORD || 'tlou-thor-cache-key' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v7
+        if: ${{ needs.driver.result == 'success' }}
+        with:
+          name: turnip-thor-for-tlou
+          path: driver
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Download the official v0.1 APK
+        run: |
+          mkdir -p work
+          curl -sSfL --retry 3 -o work/original.apk "$APK_URL"
+          sha256sum work/original.apk
+
+      - name: Check the refreshed preparer builds every resolution profile
+        run: |
+          python3 -I -c "
+          import sys; sys.path.insert(0, 'android')
+          import tlou_patches as t
+          for r in ('original', '720', '540', '360'):
+              t.selected_options({'resolution': r})
+          print('tlou_patches.py: original/720/540/360 OK')
+          "
+
+      - name: Stage native payload, aim fix and driver
+        run: |
+          driver=$(ls driver/*.zip 2>/dev/null | head -n 1 || true)
+          python3 -I stage_apk.py --apk work/original.apk --out out/android-bionic \
+            --patches android/tlou_patches.py ${driver:+--driver "$driver"}
+
+      - name: Unit test (extra environment parser)
+        run: gradle -p android-launcher :app:testReleaseUnitTest --tests ro.cobrabm.fexdroid.ThorEnvTest --no-daemon --max-workers=2
+
+      - name: Build the launcher
+        run: gradle -p android-launcher :app:assembleRelease --no-daemon --max-workers=2
+
+      - name: Restore the signing key of earlier runs
+        uses: actions/cache/restore@v4
+        with:
+          path: work/signing/tlou-thor.p12
+          key: tlou-thor-signing-v1
+
+      - name: Signing key
+        id: key
+        env:
+          SECRET_KS: ${{ secrets.TLOU_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/signing
+          if [ -n "${SECRET_KS:-}" ]; then
+            printf '%s' "$SECRET_KS" | base64 -d > "$KS_FILE"
+            echo "Signing key: repository secret TLOU_KEYSTORE_B64"
+          elif [ -s "$KS_FILE" ]; then
+            echo "Signing key: the same one as earlier runs (Actions cache)"
+          else
+            keytool -genkeypair -keystore "$KS_FILE" -storetype PKCS12 -alias tlou-thor -keyalg RSA \
+              -keysize 3072 -validity 10950 -storepass "$KS_PASS" -keypass "$KS_PASS" \
+              -dname "CN=TLOU Remastered AYN Thor edition"
+            echo "new=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::New signing key. An APK signed with an earlier key will not update in place: export saves, uninstall it, then install this one."
+          fi
+
+      - name: Keep the new signing key for later runs
+        if: ${{ steps.key.outputs.new == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: work/signing/tlou-thor.p12
+          key: tlou-thor-signing-v1
+
+      - name: Align and sign
+        run: |
+          set -euo pipefail
+          bt="$ANDROID_HOME/build-tools/35.0.0"
+          apk="work/$OUT_NAME.apk"
+          "$bt/zipalign" -f -p 4 android-launcher/app/build/outputs/apk/release/app-release-unsigned.apk work/aligned.apk
+          "$bt/apksigner" sign --ks "$KS_FILE" --ks-key-alias tlou-thor \
+            --ks-pass env:KS_PASS --key-pass env:KS_PASS --out "$apk" work/aligned.apk
+          "$bt/apksigner" verify --print-certs "$apk" | grep -i "SHA-256" | head -n 1
+          "$bt/apksigner" verify --verbose "$apk" | head -n 6
+          "$bt/zipalign" -c -p 4 "$apk"
+          "$bt/aapt2" dump badging "$apk" | grep -E "^package:|^sdkVersion|^targetSdkVersion|^application-label:"
+          "$bt/aapt2" dump badging "$apk" | grep -q "package: name='com.daedalus.tlou.remastered.thor'"
+          (cd work && sha256sum "$OUT_NAME.apk" > "$OUT_NAME.apk.sha256" && cat "$OUT_NAME.apk.sha256")
+
+      - name: Compare with the official APK
+        run: |
+          python3 -I check_apk.py work/original.apk "work/$OUT_NAME.apk" android/tlou_patches.py \
+            ${{ needs.driver.result == 'success' && '--driver' || '' }}
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.OUT_NAME }}
+          path: |
+            work/${{ env.OUT_NAME }}.apk
+            work/${{ env.OUT_NAME }}.apk.sha256
+          if-no-files-found: error
